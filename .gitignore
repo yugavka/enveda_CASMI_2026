@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# competition data
+data/
+
+# per-molecule bench output (regenerate with frag/bench.py)
+frag/results/*/per_molecule.csv
