@@ -103,9 +103,10 @@ def plans(delta, tol, max_steps=2):
     return out
 
 
-def _apply(rxn, smiles_set, cap):
-    out = set()
-    for smi in smiles_set:
+def _apply(rxn, smiles_list, cap):
+    """Products of `rxn` on each input, in a deterministic order (the cap must not depend on hash seeds)."""
+    out = {}
+    for smi in smiles_list:
         m = Chem.MolFromSmiles(smi)
         if m is None:
             continue
@@ -117,10 +118,10 @@ def _apply(rxn, smiles_set, cap):
             except Exception:
                 continue
             if '.' not in s:
-                out.add(s)
+                out[s] = None
             if len(out) >= cap:
-                return out
-    return out
+                return list(out)
+    return list(out)
 
 
 def generate_plans(neighbour, query_mass, ppm=10.0, abs_tol=0.003, max_steps=2, cap=400):
@@ -134,7 +135,7 @@ def generate_plans(neighbour, query_mass, ppm=10.0, abs_tol=0.003, max_steps=2, 
     root = Chem.MolToSmiles(m)
     out = {}
     for combo in plans(query_mass - base, tol, max_steps):
-        cur = {root}
+        cur = [root]
         for i in combo:
             cur = _apply(rules[i][1], cur, cap)
             if not cur:

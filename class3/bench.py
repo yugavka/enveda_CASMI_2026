@@ -22,23 +22,20 @@ import numpy as np
 import pandas as pd
 import pyarrow.dataset as ds
 from rdkit import Chem, DataStructs, RDLogger
-from rdkit.Chem import rdFingerprintGenerator
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / 'frag'))
+import candidates as C  # noqa: E402
 import library as L  # noqa: E402
 import transforms as T  # noqa: E402
 
 RDLogger.DisableLog('rdApp.*')
 THRESHOLDS = (1.0, 0.85, 0.7)
 K_NEIGHBOURS = 30
-CAP_PER_NEIGHBOUR = 150
 MAX_QUERY_SPECTRA = 6
-FPG = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+FPG = C.FPG
 NP_LIBS = ['enveda-np-examples', 'gnps', 'riken', 'mona', 'msdial', 'massbank']
-# our adduct names -> the neural model's vocabulary (sanpier casmi_spectrum_model_v1 features.ADDUCTS)
-NEURAL_ADDUCT = {'[M+CH2O2-H]-': '[M+FA-H]-', '[M-H2O+H]+': '[M+H-H2O]+'}
 _SCORER = None
 
 
@@ -50,29 +47,6 @@ def _init_worker(model_dir, checkpoint):
     if model_dir:
         from neural import Scorer  # our re-implementation; only weights are read from the bundle
         _SCORER = Scorer(model_dir, checkpoint=checkpoint)
-
-
-def neural_scores(q, smiles):
-    if _SCORER is None:
-        return np.full(len(smiles), np.nan)
-    spectra = [dict(mzs=s['mz'], intensities=s['it'], precursor_mz=s['prec'],
-                    adduct=NEURAL_ADDUCT.get(s['adduct'], s['adduct']),
-                    ionization_mode='positive' if s['mode'] > 0 else 'negative', collision_energy=s.get('ce'))
-               for s in q['spectra']]
-    out = _SCORER.score_candidates(spectra, smiles).astype(float)
-    out[~np.isfinite(out)] = np.nan
-    return out
-
-
-def zscore(x):
-    x = np.asarray(x, float)
-    sd = np.nanstd(x)
-    return np.nan_to_num((x - np.nanmean(x)) / sd if sd > 0 else np.zeros_like(x), nan=-3.0)
-
-
-def k14(smi):
-    m = Chem.MolFromSmiles(smi) if smi else None
-    return Chem.MolToInchiKey(m)[:14] if m is not None else None
 
 
 def load_queries(data, source='np', n=0, seed=0, model_dir=None, exclude=(), np_first=True):
@@ -105,56 +79,25 @@ def load_queries(data, source='np', n=0, seed=0, model_dir=None, exclude=(), np_
     return out
 
 
-def neighbour_scores(q, lib_meta, frag, nl):
-    """Best combined cosine of each library structure to any of the query's spectra (same polarity only)."""
-    best = np.zeros(len(lib_meta))
-    pos = (lib_meta.ionization_mode == 'positive').to_numpy()
-    for s in q['spectra']:
-        fb, fw, nb, nw = L.spectrum_vectors(s['mz'], s['it'], s['prec'], s['adduct'])
-        if len(fb) < 3:
-            continue
-        qf = np.zeros(L.NBINS); qf[fb] = fw
-        qn = np.zeros(L.NBINS); qn[nb] = nw
-        sim = 0.5 * (frag @ qf + nl @ qn)
-        sim[pos != (s['mode'] > 0)] = 0.0
-        best = np.maximum(best, sim)
-    return pd.Series(best).groupby(lib_meta.inchikey14.to_numpy()).max()
-
-
 def _work(args):
     """Generate from the neighbours of one query under one threshold and rank the candidates."""
-    import frag_rescore as frag
     q, thr, neighbours, steps = args
     truth = q['ik']
-    cands = {}  # key -> (smiles, parent rank, parent similarity, rule names, parent smiles)
-    support = {}  # key -> number of neighbours that generate it
-    for rank, (smi, sim) in enumerate(neighbours, 1):
-        for c, plan in T.generate_plans(smi, q['mass'], max_steps=steps, cap=CAP_PER_NEIGHBOUR).items():
-            key = k14(c)
-            if not key:
-                continue
-            support[key] = support.get(key, 0) + 1
-            if key not in cands:
-                cands[key] = (c, rank, sim, plan, smi)
-    row = dict(ik=truth, lib=q.get('lib'), thr=thr, n_neighbours=len(neighbours), n_cands=len(cands),
-               best_neighbour_sim=neighbours[0][1] if neighbours else 0.0, generated=truth in cands)
-    if not cands:
+    keys, raw, feats = C.build(q, neighbours, steps, _SCORER, qid=f"{truth}|{thr}", truth=truth)
+    for f in feats:
+        f.update(ik=truth, thr=thr)
+    row = dict(ik=truth, lib=q.get('lib'), thr=thr, n_neighbours=len(neighbours), n_cands=len(keys),
+               best_neighbour_sim=neighbours[0][1] if neighbours else 0.0, generated=truth in keys)
+    if not keys:
         return row, []
-    keys = list(cands)
-    smiles = [cands[k][0] for k in keys]
-    fs = np.array([np.nan if v is None else v for v in frag.score_molecule(q['spectra'], smiles, cache={})])
-    fs = np.nan_to_num(fs, nan=-1.0)
-    psim = np.array([cands[k][2] for k in keys])
-    prank = np.array([cands[k][1] for k in keys])
-    ns = neural_scores(q, smiles)
-    zf, zn, zp = zscore(fs), zscore(ns), zscore(psim)
-    feats = candidate_features(q, thr, keys, cands, support, fs, ns, psim, prank, zf, zn, zp)
+    fs, psim, prank = raw['frag'], raw['parent_sim'], raw['parent_rank']
+    zf, zn, zp = raw['z_frag'], raw['z_neural'], raw['z_parent']
     rankings = {'frag': fs, 'parent': psim - 1e-3 * prank + 1e-6 * fs, 'frag+parent': fs + 0.5 * psim}
     if _SCORER is not None:
         rankings.update({'neural': zn, 'neural+frag': zn + zf, 'neural+frag+parent': zn + zf + 0.5 * zp,
                          'neural2+frag': 2 * zn + zf})
     for name, score in rankings.items():
-        if truth in cands:
+        if truth in keys:
             i = keys.index(truth)
             ties = int((score == score[i]).sum()) - 1
             r = 1 + int((score > score[i]).sum()) + ties / 2  # the middle of its tie block
@@ -165,25 +108,6 @@ def _work(args):
             row[f'rank_{name}'] = np.nan
             row[f'rr25_{name}'] = 0.0
     return row, feats
-
-
-def candidate_features(q, thr, keys, cands, support, fs, ns, psim, prank, zf, zn, zp):
-    """One dict per candidate: ranker features (all computable at test time) plus ids and the label."""
-    rank_of = lambda v: (-np.nan_to_num(v, nan=-1e9)).argsort().argsort() + 1
-    rf, rn = rank_of(fs), rank_of(ns)
-    out = []
-    for j, k in enumerate(keys):
-        smi, _, _, plan, parent = cands[k]
-        m, pm = Chem.MolFromSmiles(smi), Chem.MolFromSmiles(parent)
-        tan = DataStructs.TanimotoSimilarity(FPG.GetFingerprint(m), FPG.GetFingerprint(pm)) if m and pm else np.nan
-        out.append(dict(
-            qid=f"{q['ik']}|{thr}", ik=q['ik'], thr=thr, cand=k, label=int(k == q['ik']), smiles=smi,
-            frag=fs[j], neural=ns[j], parent_sim=psim[j], parent_rank=int(prank[j]), z_frag=zf[j], z_neural=zn[j],
-            z_parent=zp[j], rank_frag=int(rf[j]), rank_neural=int(rn[j]), support=support[k], n_steps=len(plan),
-            rule1=plan[0], rule2=plan[1] if len(plan) > 1 else '', tan_parent=tan,
-            heavy=m.GetNumHeavyAtoms() if m else 0, heavy_parent=pm.GetNumHeavyAtoms() if pm else 0,
-            n_cands=len(keys)))
-    return out
 
 
 def main():
@@ -220,7 +144,7 @@ def main():
 
     jobs = []
     for q in queries:
-        sims = neighbour_scores(q, meta, frag_m, nl_m).reindex(structs.index).fillna(0.0)
+        sims = C.neighbour_scores(q, meta, frag_m, nl_m).reindex(structs.index).fillna(0.0)
         tan = np.array(DataStructs.BulkTanimotoSimilarity(FPG.GetFingerprint(Chem.MolFromSmiles(q['smiles'])), fps))
         for thr in THRESHOLDS:
             keep = (tan < thr) & (structs.index != q['ik'])
@@ -248,7 +172,7 @@ def main():
                                 **{f'top1_{k}': (f'rank_{k}', lambda r: float((r <= 1).mean())) for k in names})
     agg.to_csv(out / 'summary.csv')
     (out / 'config.json').write_text(json.dumps(dict(vars(a), thresholds=THRESHOLDS,
-                                                     cap=CAP_PER_NEIGHBOUR, rules=[r[0] for r in T.RULES]), indent=2))
+                                                     cap=C.CAP_PER_NEIGHBOUR, rules=[r[0] for r in T.RULES]), indent=2))
     pd.set_option('display.width', 200)
     print(agg.round(3).to_string())
     print(f'done in {time.time() - t0:.0f}s')
