@@ -32,7 +32,7 @@ import transforms as T  # noqa: E402
 
 RDLogger.DisableLog('rdApp.*')
 THRESHOLDS = (1.0, 0.85, 0.7)
-K_NEIGHBOURS = 15
+K_NEIGHBOURS = 30
 CAP_PER_NEIGHBOUR = 150
 MAX_QUERY_SPECTRA = 6
 FPG = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
@@ -124,11 +124,11 @@ def neighbour_scores(q, lib_meta, frag, nl):
 def _work(args):
     """Generate from the neighbours of one query under one threshold and rank the candidates."""
     import frag_rescore as frag
-    q, thr, neighbours = args
+    q, thr, neighbours, steps = args
     truth = q['ik']
     cands = {}  # key -> (smiles, parent rank, parent similarity)
     for rank, (smi, sim) in enumerate(neighbours, 1):
-        for c in T.generate(smi, q['mass'], cap=CAP_PER_NEIGHBOUR):
+        for c in T.generate(smi, q['mass'], max_steps=steps, cap=CAP_PER_NEIGHBOUR):
             key = k14(c)
             if key and key not in cands:
                 cands[key] = (c, rank, sim)
@@ -173,6 +173,8 @@ def main():
     ap.add_argument('--model', default='data/models/sanpier/casmi_spectrum_model_v1',
                     help="neural model bundle: config.json + checkpoint ('' to skip the neural ranking)")
     ap.add_argument('--checkpoint', default='best_validation_model.pt')
+    ap.add_argument('--k', type=int, default=K_NEIGHBOURS, help='spectral neighbours per query')
+    ap.add_argument('--steps', type=int, default=2, help='max transformations chained')
     ap.add_argument('--workers', type=int, default=max(1, (os.cpu_count() or 2) - 1))
     a = ap.parse_args()
     t0 = time.time()
@@ -194,8 +196,8 @@ def main():
         tan = np.array(DataStructs.BulkTanimotoSimilarity(FPG.GetFingerprint(Chem.MolFromSmiles(q['smiles'])), fps))
         for thr in THRESHOLDS:
             keep = (tan < thr) & (structs.index != q['ik'])
-            top = sims[keep].nlargest(K_NEIGHBOURS)
-            jobs.append((q, thr, [(structs[i], float(v)) for i, v in top.items()]))
+            top = sims[keep].nlargest(a.k)
+            jobs.append((q, thr, [(structs[i], float(v)) for i, v in top.items()], a.steps))
     print(f'neighbours ready: {len(jobs)} jobs ({time.time() - t0:.0f}s)', flush=True)
 
     rows = []
@@ -215,7 +217,7 @@ def main():
                                 **{f'mrr25_{k}': (f'rr25_{k}', 'mean') for k in names},
                                 **{f'top1_{k}': (f'rank_{k}', lambda r: float((r <= 1).mean())) for k in names})
     agg.to_csv(out / 'summary.csv')
-    (out / 'config.json').write_text(json.dumps(dict(vars(a), thresholds=THRESHOLDS, k=K_NEIGHBOURS,
+    (out / 'config.json').write_text(json.dumps(dict(vars(a), thresholds=THRESHOLDS,
                                                      cap=CAP_PER_NEIGHBOUR, rules=[r[0] for r in T.RULES]), indent=2))
     pd.set_option('display.width', 200)
     print(agg.round(3).to_string())

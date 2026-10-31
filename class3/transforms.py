@@ -52,6 +52,20 @@ RULES = [
     ('carboxylic_from_methyl', '[CH3;$(C[#6]):1]>>[C:1](=O)O'),
     ('hydration', '[C:1]=[C:2]>>[C:1][C:2]O'),
     ('dehydration', '[CX4;H1,H2:1][CX4:2][OH1]>>[C:1]=[C:2]'),
+    # carbon skeleton: homologues (the commonest unmatched neighbour deltas on held-out GNPS: +-14, 28, 42, 56)
+    ('c_methylation_al', '[CX4;H2,H3;!$(C[O,N,S]):1]>>[C:1]C'),
+    ('c_methylation_ar', '[cH1:1]>>[c:1]C'),
+    ('c_demethylation', '[#6:1][CH3]>>[#6:1]'),
+    ('ethylation', '[CH3;$(C[CX4]):1]>>[C:1]CC'),
+    ('propylation', '[CH3;$(C[CX4]):1]>>[C:1]CCC'),
+    # heteroatom swaps and small acyl groups
+    ('amine_to_hydroxyl', '[CX4,c:2][NH2]>>[*:2]O'),
+    ('hydroxyl_to_amine', '[CX4,c:2][OH1]>>[*:2]N'),
+    ('amide_to_acid', '[C:2](=O)[NH2]>>[C:2](=O)O'),
+    ('acid_to_amide', '[C:2](=O)[OH1]>>[C:2](=O)N'),
+    ('formylation', '[NX3;H1,H2;!$(NC=O):1]>>[N:1]C=O'),
+    ('carbamoylation', '[OX2H1;$(O[#6]);!$(OC=O):1]>>[O:1]C(N)=O'),
+    ('aza_ar', '[cH1;r6:1]>>[n:1]'),
 ]
 
 
@@ -59,7 +73,7 @@ def _delta(rule):
     """Mass change of a rule, measured on a probe molecule it applies to."""
     probes = ['OCC(O)Cc1ccccc1C', 'COc1ccc(CC=CCC(=O)C)cc1O', 'CN(C)CCc1ccc(OC(C)=O)cc1',
               'OC1C(O)C(O)C(CO)OC1Oc1ccccc1', 'OC1C(O)C(O)COC1Oc1ccccc1', 'OC1C(O)C(O)C(C)OC1Oc1ccccc1',
-              'OC(=O)CCc1ccccc1', 'CNCCc1ccccc1', 'OCCC1CCCCC1C(C)=O']
+              'OC(=O)CCc1ccccc1', 'CNCCc1ccccc1', 'OCCC1CCCCC1C(C)=O', 'NCCc1ccccc1', 'NC(=O)CCc1ccccc1']
     rxn = AllChem.ReactionFromSmarts(rule)
     for p in probes:
         m = Chem.MolFromSmiles(p)
