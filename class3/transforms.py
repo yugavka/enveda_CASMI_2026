@@ -123,23 +123,30 @@ def _apply(rxn, smiles_set, cap):
     return out
 
 
-def generate(neighbour, query_mass, ppm=10.0, abs_tol=0.003, max_steps=2, cap=400):
-    """Candidates of mass `query_mass` reachable from `neighbour` by 1..max_steps rules (neighbour itself excluded)."""
+def generate_plans(neighbour, query_mass, ppm=10.0, abs_tol=0.003, max_steps=2, cap=400):
+    """{candidate smiles: rule-name tuple of the first plan that produced it} for 1..max_steps rules."""
     m = Chem.MolFromSmiles(neighbour)
     if m is None:
-        return []
+        return {}
     base = Descriptors.ExactMolWt(m)
     tol = max(abs_tol, ppm * 1e-6 * query_mass)
     rules = compiled()
-    out = set()
+    root = Chem.MolToSmiles(m)
+    out = {}
     for combo in plans(query_mass - base, tol, max_steps):
-        cur = {Chem.MolToSmiles(m)}
+        cur = {root}
         for i in combo:
             cur = _apply(rules[i][1], cur, cap)
             if not cur:
                 break
-        out |= cur
+        for s in cur:
+            out.setdefault(s, tuple(rules[i][0] for i in combo))
         if len(out) >= cap:
             break
-    out.discard(Chem.MolToSmiles(m))
-    return sorted(out)
+    out.pop(root, None)
+    return out
+
+
+def generate(neighbour, query_mass, ppm=10.0, abs_tol=0.003, max_steps=2, cap=400):
+    """Candidates of mass `query_mass` reachable from `neighbour` by 1..max_steps rules (neighbour itself excluded)."""
+    return sorted(generate_plans(neighbour, query_mass, ppm, abs_tol, max_steps, cap))

@@ -75,7 +75,7 @@ def k14(smi):
     return Chem.MolToInchiKey(m)[:14] if m is not None else None
 
 
-def load_queries(data, source='np', n=0, seed=0, model_dir=None):
+def load_queries(data, source='np', n=0, seed=0, model_dir=None, exclude=(), np_first=True):
     """Query molecules. 'np': all enveda-np-examples structures. 'val_np': structures the neural model held out
     (its validation split) from the natural-product libraries, timsTOF ones first, `n` sampled."""
     libs = ['enveda-np-examples'] if source == 'np' else NP_LIBS
@@ -86,9 +86,9 @@ def load_queries(data, source='np', n=0, seed=0, model_dir=None):
     if source == 'val_np':
         mol = pd.read_parquet(Path(model_dir) / 'molecules.parquet', columns=['key', 'split'])
         val = set(mol.key[mol.split == 'validation'])
-        t = t[t.inchikey14.isin(val)]
+        t = t[t.inchikey14.isin(val) & ~t.inchikey14.isin(set(exclude))]
         iks = sorted(t.inchikey14.unique())
-        np_first = set(t.inchikey14[t.ingest_lib == 'enveda-np-examples'])
+        np_first = set(t.inchikey14[t.ingest_lib == 'enveda-np-examples']) if np_first else set()
         rng = np.random.default_rng(seed)
         rest = [k for k in iks if k not in np_first]
         pick = sorted(np_first) + list(rng.permutation(rest))
@@ -126,23 +126,29 @@ def _work(args):
     import frag_rescore as frag
     q, thr, neighbours, steps = args
     truth = q['ik']
-    cands = {}  # key -> (smiles, parent rank, parent similarity)
+    cands = {}  # key -> (smiles, parent rank, parent similarity, rule names, parent smiles)
+    support = {}  # key -> number of neighbours that generate it
     for rank, (smi, sim) in enumerate(neighbours, 1):
-        for c in T.generate(smi, q['mass'], max_steps=steps, cap=CAP_PER_NEIGHBOUR):
+        for c, plan in T.generate_plans(smi, q['mass'], max_steps=steps, cap=CAP_PER_NEIGHBOUR).items():
             key = k14(c)
-            if key and key not in cands:
-                cands[key] = (c, rank, sim)
+            if not key:
+                continue
+            support[key] = support.get(key, 0) + 1
+            if key not in cands:
+                cands[key] = (c, rank, sim, plan, smi)
     row = dict(ik=truth, lib=q.get('lib'), thr=thr, n_neighbours=len(neighbours), n_cands=len(cands),
                best_neighbour_sim=neighbours[0][1] if neighbours else 0.0, generated=truth in cands)
     if not cands:
-        return row
+        return row, []
     keys = list(cands)
     smiles = [cands[k][0] for k in keys]
     fs = np.array([np.nan if v is None else v for v in frag.score_molecule(q['spectra'], smiles, cache={})])
     fs = np.nan_to_num(fs, nan=-1.0)
     psim = np.array([cands[k][2] for k in keys])
     prank = np.array([cands[k][1] for k in keys])
-    zf, zn, zp = zscore(fs), zscore(neural_scores(q, smiles)), zscore(psim)
+    ns = neural_scores(q, smiles)
+    zf, zn, zp = zscore(fs), zscore(ns), zscore(psim)
+    feats = candidate_features(q, thr, keys, cands, support, fs, ns, psim, prank, zf, zn, zp)
     rankings = {'frag': fs, 'parent': psim - 1e-3 * prank + 1e-6 * fs, 'frag+parent': fs + 0.5 * psim}
     if _SCORER is not None:
         rankings.update({'neural': zn, 'neural+frag': zn + zf, 'neural+frag+parent': zn + zf + 0.5 * zp,
@@ -158,7 +164,26 @@ def _work(args):
         else:
             row[f'rank_{name}'] = np.nan
             row[f'rr25_{name}'] = 0.0
-    return row
+    return row, feats
+
+
+def candidate_features(q, thr, keys, cands, support, fs, ns, psim, prank, zf, zn, zp):
+    """One dict per candidate: ranker features (all computable at test time) plus ids and the label."""
+    rank_of = lambda v: (-np.nan_to_num(v, nan=-1e9)).argsort().argsort() + 1
+    rf, rn = rank_of(fs), rank_of(ns)
+    out = []
+    for j, k in enumerate(keys):
+        smi, _, _, plan, parent = cands[k]
+        m, pm = Chem.MolFromSmiles(smi), Chem.MolFromSmiles(parent)
+        tan = DataStructs.TanimotoSimilarity(FPG.GetFingerprint(m), FPG.GetFingerprint(pm)) if m and pm else np.nan
+        out.append(dict(
+            qid=f"{q['ik']}|{thr}", ik=q['ik'], thr=thr, cand=k, label=int(k == q['ik']), smiles=smi,
+            frag=fs[j], neural=ns[j], parent_sim=psim[j], parent_rank=int(prank[j]), z_frag=zf[j], z_neural=zn[j],
+            z_parent=zp[j], rank_frag=int(rf[j]), rank_neural=int(rn[j]), support=support[k], n_steps=len(plan),
+            rule1=plan[0], rule2=plan[1] if len(plan) > 1 else '', tan_parent=tan,
+            heavy=m.GetNumHeavyAtoms() if m else 0, heavy_parent=pm.GetNumHeavyAtoms() if pm else 0,
+            n_cands=len(keys)))
+    return out
 
 
 def main():
@@ -175,6 +200,8 @@ def main():
     ap.add_argument('--checkpoint', default='best_validation_model.pt')
     ap.add_argument('--k', type=int, default=K_NEIGHBOURS, help='spectral neighbours per query')
     ap.add_argument('--steps', type=int, default=2, help='max transformations chained')
+    ap.add_argument('--exclude', default='', help='per_query.csv whose query structures are skipped (disjoint sets)')
+    ap.add_argument('--no-np-first', action='store_true', help='do not force enveda-np-examples queries in')
     ap.add_argument('--workers', type=int, default=max(1, (os.cpu_count() or 2) - 1))
     a = ap.parse_args()
     t0 = time.time()
@@ -185,7 +212,8 @@ def main():
     fps = [FPG.GetFingerprint(Chem.MolFromSmiles(s)) if Chem.MolFromSmiles(s) else None for s in structs]
     ok = [f is not None for f in fps]
     structs, fps = structs[ok], [f for f in fps if f is not None]
-    queries = load_queries(a.data, a.source, a.n, a.seed, a.model)
+    exclude = set(pd.read_csv(a.exclude).ik) if a.exclude else set()
+    queries = load_queries(a.data, a.source, a.n, a.seed, a.model, exclude, not a.no_np_first)
     if a.limit:
         queries = queries[:a.limit]
     print(f'library {len(structs):,} structures, {len(queries)} queries ({time.time() - t0:.0f}s)', flush=True)
@@ -200,10 +228,11 @@ def main():
             jobs.append((q, thr, [(structs[i], float(v)) for i, v in top.items()], a.steps))
     print(f'neighbours ready: {len(jobs)} jobs ({time.time() - t0:.0f}s)', flush=True)
 
-    rows = []
+    rows, feats = [], []
     with ProcessPoolExecutor(a.workers, initializer=_init_worker, initargs=(a.model, a.checkpoint)) as pool:
-        for i, row in enumerate(pool.map(_work, jobs, chunksize=2), 1):
+        for i, (row, f) in enumerate(pool.map(_work, jobs, chunksize=2), 1):
             rows.append(row)
+            feats += f
             if i % 150 == 0:
                 print(f'{i}/{len(jobs)} ({time.time() - t0:.0f}s)', flush=True)
     df = pd.DataFrame(rows)
@@ -212,6 +241,7 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     df.to_csv(out / 'per_query.csv', index=False)
+    pd.DataFrame(feats).to_parquet(out / 'candidates.parquet')  # ranker training/eval rows
     names = [c[5:] for c in rr]
     agg = df.groupby('thr').agg(n=('ik', 'size'), generated=('generated', 'mean'), median_cands=('n_cands', 'median'),
                                 **{f'mrr25_{k}': (f'rr25_{k}', 'mean') for k in names},
