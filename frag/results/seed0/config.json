@@ -1,0 +1,77 @@
+{
+  "data": "data/train.parquet",
+  "out": "frag/results/seed0",
+  "n": 600,
+  "seed": 0,
+  "panels": "np_examples,gnps,riken,mona_msdial,massbank,enveda180",
+  "variants": {
+    "default": {},
+    "baseline_pv": {
+      "w1": 1.0,
+      "w2": 1.0,
+      "w3": 0.3,
+      "intensity": "sqrt",
+      "mz_power": 0.0,
+      "tol": 0.01,
+      "h_shifts": [
+        -2,
+        -1,
+        0,
+        1,
+        2
+      ],
+      "max_breaks": 2,
+      "max_bonds_2": 100,
+      "max_bonds_3": 40,
+      "ppm": 0.0,
+      "w_ring": null,
+      "agg": "mean",
+      "drop_prec": 0.0
+    },
+    "tol003": {
+      "tol": 0.003
+    },
+    "ppm10": {
+      "tol": 0.002,
+      "ppm": 10.0
+    },
+    "ppm15": {
+      "tol": 0.003,
+      "ppm": 15.0
+    },
+    "ppm20": {
+      "tol": 0.003,
+      "ppm": 20.0
+    },
+    "ring07": {
+      "w_ring": 0.7
+    },
+    "ring08": {
+      "w_ring": 0.8
+    },
+    "ring09": {
+      "w_ring": 0.9
+    },
+    "ring10": {
+      "w_ring": 1.0
+    },
+    "ring08_ppm10": {
+      "w_ring": 0.8,
+      "tol": 0.002,
+      "ppm": 10.0
+    },
+    "agg_npeaks": {
+      "agg": "npeaks"
+    },
+    "agg_max": {
+      "agg": "max"
+    },
+    "drop_prec": {
+      "drop_prec": 0.5
+    }
+  },
+  "workers": 14,
+  "max_spectra": 4,
+  "n_decoys": 30,
+  "top_peaks": 120
+}
