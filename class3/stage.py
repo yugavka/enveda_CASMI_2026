@@ -3,7 +3,11 @@
 For each molecule whose best library match is below `gate` (the pipeline's leader is not library-confirmed), find
 its spectral neighbours in a library built from train.parquet, generate analogs of the query mass, rank them with
 the learned LambdaRank model and insert the best `n_insert` new structures at rank `position` (1-based); ranks
-above it are kept, the rest shift down and the list is cut at 25.
+above it are kept, the rest shift down and the list is cut at 25. When the ranker's top-1 margin over the runner-up
+is at least `confident_margin`, the top pick goes to `confident_position` instead (eval: P(top1) ~0.40 at margin 0.8).
+
+`variants` {name: overrides of gate/position/n_insert/confident_*} also writes submission_<name>.csv from the same
+candidates, so one notebook run yields several LB probes.
 
     run(root, comp, bundle, lib_max, cfg) -> report dict   (submission.csv in `root` is rewritten in place)
 """
@@ -22,8 +26,9 @@ import pandas as pd
 import candidates as C
 import library as L
 
-DEFAULTS = dict(gate=0.87, position=3, n_insert=3, k=30, steps=2, max_spectra=6, seconds=2400, workers=0,
-                checkpoint='final_model.pt', limit=0)
+DEFAULTS = dict(gate=0.87, position=3, n_insert=3, confident_margin=None, confident_position=1, k=30, steps=2,
+                max_spectra=6, seconds=2400, workers=0, checkpoint='final_model.pt', limit=0, variants={})
+PLACEMENT = ('gate', 'position', 'n_insert', 'confident_margin', 'confident_position')
 _SCORER = None
 
 
@@ -80,7 +85,8 @@ def run(root, comp, bundle, lib_max, cfg=None, ranker_dir=None, cache=None):
     root, comp = Path(root), Path(comp)
     ranker_dir = Path(ranker_dir or Path(__file__).resolve().parent / 'ranker')
     sub = pd.read_csv(root / 'submission.csv', dtype=str, keep_default_na=False)
-    gated = [m for m in sub.molecule_id if float(lib_max.get(str(m), 0.0)) < c['gate']]
+    max_gate = max([c['gate']] + [v.get('gate', c['gate']) for v in c['variants'].values()])
+    gated = [m for m in sub.molecule_id if float(lib_max.get(str(m), 0.0)) < max_gate]
     if c['limit']:
         gated = gated[:c['limit']]
     rep = dict(status='started', cfg=c, molecules=len(sub), gated=len(gated))
@@ -121,20 +127,41 @@ def run(root, comp, bundle, lib_max, cfg=None, ranker_dir=None, cache=None):
             if feats:
                 s = rank_features(feats, model, meta)
                 order = np.argsort(-s, kind='stable')
-                picks[mid] = [feats[i]['smiles'] for i in order]
+                picks[mid] = ([feats[i]['smiles'] for i in order], s[order])
         for f in futures:
             f.cancel()
 
-    changed, inserted = 0, 0
+    rep.update(jobs=len(jobs), with_candidates=len(picks), timed_out=timed_out)
+    main = {k: c[k] for k in PLACEMENT}
+    out, stats = place(sub, picks, lib_max, main)
+    _write(out, root / 'submission.csv')
+    rep['variants'] = {}
+    for name, v in c['variants'].items():
+        vout, vstats = place(sub, picks, lib_max, dict(main, **v))
+        _write(vout, root / f'submission_{name}.csv')
+        rep['variants'][name] = vstats
+    return dict(rep, status='applied', **stats, seconds=round(time.time() - t0, 1))
+
+
+def place(sub, picks, lib_max, p):
+    """Submission with the ranked picks inserted under placement `p`; unchanged rows pass through byte for byte."""
+    changed, inserted, confident = 0, 0, 0
     rows = []
     for mid, smi in zip(sub.molecule_id, sub.smiles):
-        old = smi.split(';')
-        text = smi  # rows we do not change pass through byte for byte
-        if mid in picks:
-            have = {C.k14(s) for s in old}
-            add = [s for s in picks[mid] if C.k14(s) not in have][:c['n_insert']]
+        text = smi
+        if mid in picks and float(lib_max.get(str(mid), 0.0)) < p['gate']:
+            old = smi.split(';')
+            have = {C.k14(x) for x in old}
+            ranked, scores = picks[mid]
+            keep = [i for i, x in enumerate(ranked) if C.k14(x) not in have][:p['n_insert']]
+            add = [ranked[i] for i in keep]
             if add:
-                new = insert(old, add, c['position'])
+                margin = scores[0] - scores[1] if len(scores) > 1 else np.inf
+                if p['confident_margin'] is not None and keep[0] == 0 and margin >= p['confident_margin']:
+                    new = insert(insert(old, add[1:], p['position']), add[:1], p['confident_position'])
+                    confident += 1
+                else:
+                    new = insert(old, add, p['position'])
                 assert 1 <= len(new) <= 25 and len(set(new)) == len(new) and all(new), mid
                 inserted += len(set(new) - set(old))
                 changed += 1
@@ -142,8 +169,10 @@ def run(root, comp, bundle, lib_max, cfg=None, ranker_dir=None, cache=None):
         rows.append((mid, text))
     out = pd.DataFrame(rows, columns=['molecule_id', 'smiles'])
     assert out.molecule_id.tolist() == sub.molecule_id.tolist()
-    tmp = root / 'submission.class3.tmp'
-    out.to_csv(tmp, index=False)
-    os.replace(tmp, root / 'submission.csv')
-    return dict(rep, status='applied', jobs=len(jobs), with_candidates=len(picks), changed_rows=int(changed),
-                inserted=int(inserted), timed_out=timed_out, seconds=round(time.time() - t0, 1))
+    return out, dict(changed_rows=int(changed), inserted=int(inserted), confident=int(confident), placement=p)
+
+
+def _write(df, path):
+    tmp = path.with_suffix('.tmp')
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
