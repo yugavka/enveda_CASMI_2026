@@ -7,8 +7,10 @@ Idempotent; re-run after changing any class3 module or retraining the ranker.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import zlib
 import sys
 from pathlib import Path
 
@@ -33,7 +35,7 @@ CELL = '''{marker} (ours): new structures for molecules the pipeline cannot conf
 # (Apache-2.0); only its config and weights are read from the attached dataset. Any error restores the input file.
 import sys, json, time, shutil, traceback, glob
 from pathlib import Path
-C3_FILES = {files}
+C3_FILES = json.loads(__import__('zlib').decompress(__import__('base64').b64decode({blob})))  # name -> text
 C3_SHA256 = {shas}
 C3_DIR = CODE / 'class3'
 for _name, _text in C3_FILES.items():
@@ -79,7 +81,8 @@ def main(path):
     files = {name: (HERE / name).read_text() for name in MODULES + ASSETS}
     files.update({name: (HERE / src_path).read_text() for name, src_path in EXTRA.items()})
     shas = {k: hashlib.sha256(v.encode()).hexdigest() for k, v in files.items()}
-    cell_src = CELL.format(marker=MARKER, files=repr(files), shas=repr(shas))
+    blob = base64.b64encode(zlib.compress(json.dumps(files).encode(), 9)).decode()
+    cell_src = CELL.format(marker=MARKER, blob=repr(blob), shas=repr(shas))
 
     # config switches
     cfg = nb['cells'][1]
