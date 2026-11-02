@@ -6,6 +6,9 @@ the learned LambdaRank model and insert the best `n_insert` new structures at ra
 above it are kept, the rest shift down and the list is cut at 25. When the ranker's top-1 margin over the runner-up
 is at least `confident_margin`, the top pick goes to `confident_position` instead (eval: P(top1) ~0.40 at margin 0.8).
 
+`rerank` ('all' | 'freeze1' | None): before the insertion, the same gated lists are reordered by the isomer reranker
+(rerank/; trained on held-out molecules whose spectra were removed from the library); 'freeze1' keeps the leader.
+
 `variants` {name: overrides of gate/position/n_insert/confident_*} also writes submission_<name>.csv from the same
 candidates, so one notebook run yields several LB probes.
 
@@ -24,10 +27,12 @@ import numpy as np
 import pandas as pd
 
 import candidates as C
+import features as RF
 import library as L
 
 DEFAULTS = dict(gate=0.87, position=3, n_insert=3, confident_margin=None, confident_position=1, k=30, steps=2,
-                max_spectra=6, seconds=2400, workers=0, checkpoint='final_model.pt', limit=0, variants={})
+                max_spectra=6, seconds=2400, workers=0, checkpoint='final_model.pt', limit=0, variants={},
+                rerank=None)
 PLACEMENT = ('gate', 'position', 'n_insert', 'confident_margin', 'confident_position')
 _SCORER = None
 
@@ -41,9 +46,25 @@ def _init(bundle, checkpoint):
 
 
 def _one(args):
-    mid, q, neighbours, steps = args
+    mid, q, neighbours, steps, rr = args
     keys, _, feats = C.build(q, neighbours, steps, _SCORER, qid=mid)
-    return mid, feats
+    rows = []
+    if rr is not None:
+        smiles, rr_neighbours = rr
+        rows = RF.features(q, [C.k14(s) for s in smiles], smiles, {1.0: rr_neighbours}, _SCORER,
+                           short=len(smiles), order=[C.k14(s) for s in smiles])[0][1.0]
+    return mid, feats, rows
+
+
+def rerank_list(old, rows, model, meta, mode):
+    """`old` reordered by the reranker score; candidates without a valid structure stay at the end."""
+    if not rows:
+        return old
+    s = model.predict(pd.DataFrame(rows)[meta['numeric']])
+    ranked = [rows[i]['smiles'] for i in np.argsort(-s, kind='stable')]
+    if mode == 'freeze1' and old:
+        ranked = [old[0]] + [x for x in ranked if x != old[0]]
+    return ranked + [x for x in old if x not in set(ranked)]
 
 
 def queries_from_test(test_path, max_spectra):
@@ -99,6 +120,7 @@ def run(root, comp, bundle, lib_max, cfg=None, ranker_dir=None, cache=None):
     meta_lib, frag_m, nl_m = L.load(cache)
     structs = meta_lib.drop_duplicates('inchikey14').set_index('inchikey14').normalized_smiles
     queries = queries_from_test(comp / 'test.parquet', c['max_spectra'])
+    sub_lists = {str(m): x.split(';') for m, x in zip(sub.molecule_id, sub.smiles)}
     rep['library_seconds'] = round(time.time() - t0, 1)
 
     jobs = []
@@ -106,12 +128,22 @@ def run(root, comp, bundle, lib_max, cfg=None, ranker_dir=None, cache=None):
         q = queries.get(str(mid))
         if q is None:
             continue
-        top = C.neighbour_scores(q, meta_lib, frag_m, nl_m).reindex(structs.index).fillna(0.0).nlargest(c['k'])
-        jobs.append((str(mid), q, [(structs[i], float(v)) for i, v in top.items()], c['steps']))
+        top = C.neighbour_scores(q, meta_lib, frag_m, nl_m).reindex(structs.index).fillna(0.0).nlargest(c['k'] + 5)
+        rr = None
+        old = sub_lists[str(mid)]
+        if c['rerank'] and len(old) > 1 and len({C.k14(x) for x in old} - {None}) == len(old):
+            rr = (old, [(i, structs[i], float(v)) for i, v in top.items()])
+        top = top.head(c['k'])
+        jobs.append((str(mid), q, [(structs[i], float(v)) for i, v in top.items()], c['steps'], rr))
     rep['neighbour_seconds'] = round(time.time() - t0, 1)
 
     model = lgb.Booster(model_file=str(ranker_dir / 'ranker.txt'))
     meta = json.loads((ranker_dir / 'meta.json').read_text())
+    rr_dir = ranker_dir.parent / 'rerank'
+    if c['rerank']:
+        rr_model = lgb.Booster(model_file=str(rr_dir / 'ranker.txt'))
+        rr_meta = json.loads((rr_dir / 'meta.json').read_text())
+    reranked = {}
     workers = c['workers'] or max(1, (os.cpu_count() or 2))
     ctx = mp.get_context('fork') if 'fork' in mp.get_all_start_methods() else None
     picks, timed_out = {}, 0
@@ -120,10 +152,14 @@ def run(root, comp, bundle, lib_max, cfg=None, ranker_dir=None, cache=None):
         for f in futures:
             left = c['seconds'] - (time.time() - t0)
             try:
-                mid, feats = f.result(timeout=max(left, 1))
+                mid, feats, rr_rows = f.result(timeout=max(left, 1))
             except Exception:  # timeout or a failed molecule: that molecule keeps its list
                 timed_out += 1
                 continue
+            if rr_rows and float(lib_max.get(mid, 0.0)) < c['gate']:
+                new = rerank_list(sub_lists[mid], rr_rows, rr_model, rr_meta, c['rerank'])
+                if new != sub_lists[mid]:
+                    reranked[mid] = new
             if feats:
                 s = rank_features(feats, model, meta)
                 order = np.argsort(-s, kind='stable')
@@ -131,26 +167,29 @@ def run(root, comp, bundle, lib_max, cfg=None, ranker_dir=None, cache=None):
         for f in futures:
             f.cancel()
 
-    rep.update(jobs=len(jobs), with_candidates=len(picks), timed_out=timed_out)
+    rep.update(jobs=len(jobs), with_candidates=len(picks), timed_out=timed_out, reranked=len(reranked),
+               new_leader=sum(v[0] != sub_lists[m][0] for m, v in reranked.items()))
     main = {k: c[k] for k in PLACEMENT}
-    out, stats = place(sub, picks, lib_max, main)
+    out, stats = place(sub, picks, lib_max, main, reranked)
     _write(out, root / 'submission.csv')
     rep['variants'] = {}
     for name, v in c['variants'].items():
-        vout, vstats = place(sub, picks, lib_max, dict(main, **v))
+        vout, vstats = place(sub, picks, lib_max, dict(main, **v), reranked)
         _write(vout, root / f'submission_{name}.csv')
         rep['variants'][name] = vstats
     return dict(rep, status='applied', **stats, seconds=round(time.time() - t0, 1))
 
 
-def place(sub, picks, lib_max, p):
-    """Submission with the ranked picks inserted under placement `p`; unchanged rows pass through byte for byte."""
+def place(sub, picks, lib_max, p, reranked=None):
+    """Submission with the (reranked) lists and the ranked picks inserted under placement `p`; unchanged rows pass
+    through byte for byte."""
+    reranked = reranked or {}
     changed, inserted, confident = 0, 0, 0
     rows = []
     for mid, smi in zip(sub.molecule_id, sub.smiles):
-        text = smi
+        text = ';'.join(reranked[mid]) if mid in reranked else smi
         if mid in picks and float(lib_max.get(str(mid), 0.0)) < p['gate']:
-            old = smi.split(';')
+            old = text.split(';')
             have = {C.k14(x) for x in old}
             ranked, scores = picks[mid]
             keep = [i for i, x in enumerate(ranked) if C.k14(x) not in have][:p['n_insert']]

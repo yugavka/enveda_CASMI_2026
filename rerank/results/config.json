@@ -1,0 +1,17 @@
+{
+  "data": "data/train.parquet",
+  "cache": "data/cache",
+  "out": "rerank/results",
+  "n": 4000,
+  "seed": 0,
+  "model": "data/models/sanpier/casmi_spectrum_model_v1",
+  "checkpoint": "best_validation_model.pt",
+  "k": 30,
+  "workers": 14,
+  "thresholds": [
+    1.0,
+    0.85
+  ],
+  "cap": 200,
+  "short": 25
+}

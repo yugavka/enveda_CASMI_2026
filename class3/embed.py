@@ -15,6 +15,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 MODULES = ['library.py', 'transforms.py', 'neural.py', 'candidates.py', 'stage.py']
 ASSETS = ['ranker/ranker.txt', 'ranker/meta.json']
+EXTRA = {'features.py': '../rerank/features.py',  # isomer reranker (rerank/): published name -> source
+         'rerank/ranker.txt': '../rerank/model/ranker.txt', 'rerank/meta.json': '../rerank/model/meta.json'}
 MARKER = '# ── Class-3 analog insertion'
 CONFIG_ANCHOR = 'OUTSIDER_FILL = True\n'
 CONFIG_ADD = """
@@ -34,8 +36,8 @@ from pathlib import Path
 C3_FILES = {files}
 C3_SHA256 = {shas}
 C3_DIR = CODE / 'class3'
-(C3_DIR / 'ranker').mkdir(parents=True, exist_ok=True)
 for _name, _text in C3_FILES.items():
+    (C3_DIR / _name).parent.mkdir(parents=True, exist_ok=True)
     assert __import__('hashlib').sha256(_text.encode()).hexdigest() == C3_SHA256[_name], _name
     (C3_DIR / _name).write_text(_text)
 for _p in (str(C3_DIR), str(ROOT)):
@@ -75,6 +77,7 @@ def main(path):
     path = Path(path)
     nb = json.loads(path.read_text())
     files = {name: (HERE / name).read_text() for name in MODULES + ASSETS}
+    files.update({name: (HERE / src_path).read_text() for name, src_path in EXTRA.items()})
     shas = {k: hashlib.sha256(v.encode()).hexdigest() for k, v in files.items()}
     cell_src = CELL.format(marker=MARKER, files=repr(files), shas=repr(shas))
 
