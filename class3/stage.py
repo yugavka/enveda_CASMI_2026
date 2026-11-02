@@ -57,14 +57,19 @@ def _one(args):
 
 
 def rerank_list(old, rows, model, meta, mode):
-    """`old` reordered by the reranker score; candidates without a valid structure stay at the end."""
+    """`old` reordered by the reranker score over one entry per InChIKey14 block (the first); the other entries of
+    a block follow their representative, entries without a valid structure go to the end."""
     if not rows:
         return old
     s = model.predict(pd.DataFrame(rows)[meta['numeric']])
-    ranked = [rows[i]['smiles'] for i in np.argsort(-s, kind='stable')]
-    if mode == 'freeze1' and old:
-        ranked = [old[0]] + [x for x in ranked if x != old[0]]
-    return ranked + [x for x in old if x not in set(ranked)]
+    keys = [rows[i]['cand'] for i in np.argsort(-s, kind='stable')]
+    if mode == 'freeze1' and C.k14(old[0]) in keys:
+        keys = [C.k14(old[0])] + [k for k in keys if k != C.k14(old[0])]
+    block = {}
+    for x in old:
+        block.setdefault(C.k14(x), []).append(x)
+    out = [x for k in keys for x in block.get(k, [])]
+    return out + [x for x in old if x not in set(out)]
 
 
 def queries_from_test(test_path, max_spectra):
@@ -131,8 +136,13 @@ def run(root, comp, bundle, lib_max, cfg=None, ranker_dir=None, cache=None):
         top = C.neighbour_scores(q, meta_lib, frag_m, nl_m).reindex(structs.index).fillna(0.0).nlargest(c['k'] + 5)
         rr = None
         old = sub_lists[str(mid)]
-        if c['rerank'] and len(old) > 1 and len({C.k14(x) for x in old} - {None}) == len(old):
-            rr = (old, [(i, structs[i], float(v)) for i, v in top.items()])
+        reps = {}  # first entry of each InChIKey14 block, in list order
+        for x in old:
+            reps.setdefault(C.k14(x), x)
+        reps.pop(None, None)
+        reps = list(reps.items())
+        if c['rerank'] and len(reps) > 1:
+            rr = ([x for _, x in reps], [(i, structs[i], float(v)) for i, v in top.items()])
         top = top.head(c['k'])
         jobs.append((str(mid), q, [(structs[i], float(v)) for i, v in top.items()], c['steps'], rr))
     rep['neighbour_seconds'] = round(time.time() - t0, 1)
