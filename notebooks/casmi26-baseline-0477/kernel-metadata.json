@@ -18,9 +18,12 @@
     "dmitriigluzdov/casmi26-natural-product-panel-benchmark",
     "dmitriigluzdov/casmi26-pubchem-popularity-prior",
     "dmitriigluzdov/casmi26-attributed-v4g-reproduction-assets",
+    "ahmedberatozer/casmi26-spectrum-model-long",
     "sanpier/catalogue-experiment-saner"
   ],
-  "kernel_sources": [],
+  "kernel_sources": [
+    "bgunshui/casmi26-scorer-train-public"
+  ],
   "competition_sources": [
     "enveda-CASMI26-molecule-id-mass-spectra"
   ],

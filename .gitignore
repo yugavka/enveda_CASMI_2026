@@ -225,3 +225,4 @@ data/
 # per-molecule bench output (regenerate with frag/bench.py)
 frag/results/*/per_molecule.csv
 class3/results*/candidates.parquet
+rerank/results/candidates.parquet
