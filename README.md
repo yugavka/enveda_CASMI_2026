@@ -52,7 +52,7 @@ Public leaderboard. Each row is one submission and changes one thing against the
 | v6 | + isomer rerank: leader kept / full rerank | 0.461 / 0.322 |
 | **v7** | **v4 + two-model neural ensemble, `0.5·z(public) + 0.5·z(retrained)`** | **0.482** |
 | v7 | ensemble weight 0.4 / 0.6 | 0.475 / 0.473 |
-| v8 | + third model (long-schedule training), 1/3 each | scoring |
+| v8 | + third model (long-schedule training), 1/3 each | 0.465 |
 
 ¹ The same rounded score as v3, but above it on the hidden decimals: the LB rank moved from about 190 to about 50.
 
@@ -72,7 +72,8 @@ Public leaderboard. Each row is one submission and changes one thing against the
 - **Never move ranks 1–2.** The pipeline's top of the list is hard to beat: any change there cost 0.017 (v5) or far
   more (v6). Gains came from reordering ranks 2–25 and from adding new structures lower in the list.
 - **Ensemble scorers, don't replace them.** The second neural model added +0.003 as an ensemble member. Public
-  authors report that the same model *replacing* the public one scored 0.460.
+  authors report that the same model *replacing* the public one scored 0.460. A third, long-trained model
+  pulled the ensemble down to 0.465: more members only help when each one is good on this data.
 - **Offline wins don't always transfer.** The isomer reranker gained +0.065 MRR offline and lost 0.018 on the board.
   The bench's base ordering was far weaker than the pipeline's, and real lists are not same-formula isomer pools. The
   ring-opening credit improved the natural-product bench and still cost 0.004 on the board.
@@ -120,7 +121,7 @@ Kaggle constraints to keep in mind:
 - **The competition only accepts a file named `submission.csv`**, so each LB probe needs its own kernel.
 - **The commit run is a smoke test** on the visible subset. Kaggle's scoring rerun on the hidden test runs every stage.
 
-The stage switches live in the notebook's config cell: `CLASS3`, `CLASS3_CFG`, `NEURAL_W_OURS`, `NEURAL_LONG`,
+The stage switches live in the notebook's config cell: `CLASS3`, `CLASS3_CFG`, `NEURAL_W_OURS`, `NEURAL_LONG` (off),
 `FRAG_W_RING`.
 
 ---
